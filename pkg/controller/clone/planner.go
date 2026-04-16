@@ -247,6 +247,7 @@ func (p *Planner) watchSnapshots(ctx context.Context, log logr.Logger) error {
 		if meta.IsNoMatchError(err) {
 			return nil
 		}
+		return err
 	}
 
 	if err := p.watchOwned(log, &snapshotv1.VolumeSnapshot{}); err != nil {

@@ -18,6 +18,7 @@ package clone
 
 import (
 	"context"
+	"fmt"
 	"strings"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -28,9 +29,11 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	storagev1 "k8s.io/api/storage/v1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/tools/record"
@@ -38,6 +41,7 @@ import (
 
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	cdiv1 "kubevirt.io/containerized-data-importer-api/pkg/apis/core/v1beta1"
@@ -1016,6 +1020,71 @@ var _ = Describe("Planner test", func() {
 				Expect(err).To(HaveOccurred())
 				Expect(k8serrors.IsNotFound(err)).To(BeTrue())
 			}
+		})
+	})
+
+	Context("watchSnapshots tests", func() {
+		createPlannerWithInterceptor := func(listFunc func(ctx context.Context, cl client.WithWatch, list client.ObjectList, opts ...client.ListOption) error) *Planner {
+			s := scheme.Scheme
+			_ = cdiv1.AddToScheme(s)
+			_ = snapshotv1.AddToScheme(s)
+
+			builder := fake.NewClientBuilder().
+				WithScheme(s).
+				WithRuntimeObjects(cc.MakeEmptyCDICR()).
+				WithInterceptorFuncs(interceptor.Funcs{
+					List: listFunc,
+				})
+
+			cl := builder.Build()
+			rec := record.NewFakeRecorder(10)
+
+			return &Planner{
+				RootObjectType: &corev1.PersistentVolumeClaimList{},
+				OwnershipLabel: ownerLabel,
+				Client:         cl,
+				Recorder:       rec,
+			}
+		}
+
+		It("should return nil for NoMatchError (CRD not installed)", func() {
+			p := createPlannerWithInterceptor(func(ctx context.Context, cl client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
+				return &meta.NoResourceMatchError{PartialResource: schema.GroupVersionResource{
+					Group:    "snapshot.storage.k8s.io",
+					Version:  "v1",
+					Resource: "volumesnapshots",
+				}}
+			})
+			defer close(p.Recorder.(*record.FakeRecorder).Events)
+
+			err := p.watchSnapshots(context.Background(), log)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(p.watchingSnapshots).To(BeFalse())
+		})
+
+		It("should return error for non-NoMatchError failures", func() {
+			expectedErr := fmt.Errorf("network timeout")
+			p := createPlannerWithInterceptor(func(ctx context.Context, cl client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
+				return expectedErr
+			})
+			defer close(p.Recorder.(*record.FakeRecorder).Events)
+
+			err := p.watchSnapshots(context.Background(), log)
+			Expect(err).To(HaveOccurred())
+			Expect(err).To(Equal(expectedErr))
+			Expect(p.watchingSnapshots).To(BeFalse())
+		})
+
+		It("should return early when already watching", func() {
+			p := createPlannerWithInterceptor(func(ctx context.Context, cl client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
+				return fmt.Errorf("should not be called")
+			})
+			defer close(p.Recorder.(*record.FakeRecorder).Events)
+			p.watchingSnapshots = true
+
+			err := p.watchSnapshots(context.Background(), log)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(p.watchingSnapshots).To(BeTrue())
 		})
 	})
 })
