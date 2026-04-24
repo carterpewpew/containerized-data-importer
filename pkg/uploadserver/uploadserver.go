@@ -363,6 +363,10 @@ func (app *uploadServerApp) uploadHandlerAsync(irc imageReadCloser) http.Handler
 		readCloser, err := irc(r)
 		if err != nil {
 			w.WriteHeader(http.StatusBadRequest)
+			app.mutex.Lock()
+			app.uploading = false
+			app.mutex.Unlock()
+			return
 		}
 
 		processor, err := uploadProcessorFuncAsync(readCloser, app.config.Destination, app.config.ImageSize, app.config.FilesystemOverhead, app.config.Preallocation, cdiContentType)
@@ -412,6 +416,10 @@ func (app *uploadServerApp) processUpload(irc imageReadCloser, w http.ResponseWr
 	readCloser, err := irc(r)
 	if err != nil {
 		w.WriteHeader(http.StatusBadRequest)
+		app.mutex.Lock()
+		app.uploading = false
+		app.mutex.Unlock()
+		return
 	}
 
 	preallocationApplied, err := uploadProcessorFunc(readCloser, app.config.Destination, app.config.ImageSize, app.config.FilesystemOverhead, app.config.Preallocation, cdiContentType, dvContentType)

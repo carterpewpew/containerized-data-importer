@@ -410,6 +410,89 @@ var _ = Describe("Upload server tests", func() {
 		Entry("Invalid data", "foo", "bar", 401),
 	)
 
+	It("should return 400 and reset uploading flag when async irc fails", func() {
+		processorCalled := false
+		origFunc := uploadProcessorFuncAsync
+		uploadProcessorFuncAsync = func(stream io.ReadCloser, dest, imageSize string, filesystemOverhead float64, preallocation bool, contentType string) (*importer.DataProcessor, error) {
+			processorCalled = true
+			return saveAsyncProcessorSuccess(stream, dest, imageSize, filesystemOverhead, preallocation, contentType)
+		}
+		defer func() { uploadProcessorFuncAsync = origFunc }()
+
+		failingIRC := func(r *http.Request) (io.ReadCloser, error) {
+			return nil, fmt.Errorf("simulated irc error")
+		}
+
+		server := newServer()
+		handler := server.uploadHandlerAsync(failingIRC)
+
+		req, err := http.NewRequest(http.MethodPost, common.UploadPathAsync, strings.NewReader("data"))
+		Expect(err).ToNot(HaveOccurred())
+		rr := httptest.NewRecorder()
+
+		handler(rr, req)
+
+		Expect(rr.Code).To(Equal(http.StatusBadRequest))
+		Expect(processorCalled).To(BeFalse(), "processor should not be called after irc error")
+		Expect(server.uploading).To(BeFalse(), "uploading flag should be reset so subsequent requests are not blocked")
+	})
+
+	It("should return 400 and reset uploading flag when sync irc fails", func() {
+		processorCalled := false
+		origFunc := uploadProcessorFunc
+		uploadProcessorFunc = func(stream io.ReadCloser, dest, imageSize string, filesystemOverhead float64, preallocation bool, contentType string, dvContentType cdiv1.DataVolumeContentType) (bool, error) {
+			processorCalled = true
+			return saveProcessorSuccess(stream, dest, imageSize, filesystemOverhead, preallocation, contentType, dvContentType)
+		}
+		defer func() { uploadProcessorFunc = origFunc }()
+
+		failingIRC := func(r *http.Request) (io.ReadCloser, error) {
+			return nil, fmt.Errorf("simulated irc error")
+		}
+
+		server := newServer()
+
+		req, err := http.NewRequest(http.MethodPost, common.UploadPathSync, strings.NewReader("data"))
+		Expect(err).ToNot(HaveOccurred())
+		rr := httptest.NewRecorder()
+
+		server.processUpload(failingIRC, rr, req, cdiv1.DataVolumeKubeVirt)
+
+		Expect(rr.Code).To(Equal(http.StatusBadRequest))
+		Expect(processorCalled).To(BeFalse(), "processor should not be called after irc error")
+		Expect(server.uploading).To(BeFalse(), "uploading flag should be reset so subsequent requests are not blocked")
+	})
+
+	It("should accept new upload after async irc failure", func() {
+		origFunc := uploadProcessorFuncAsync
+		uploadProcessorFuncAsync = saveAsyncProcessorSuccess
+		defer func() { uploadProcessorFuncAsync = origFunc }()
+
+		failingIRC := func(r *http.Request) (io.ReadCloser, error) {
+			return nil, fmt.Errorf("simulated irc error")
+		}
+
+		server := newServer()
+		handler := server.uploadHandlerAsync(failingIRC)
+
+		req, err := http.NewRequest(http.MethodPost, common.UploadPathAsync, strings.NewReader("data"))
+		Expect(err).ToNot(HaveOccurred())
+		rr := httptest.NewRecorder()
+		handler(rr, req)
+		Expect(rr.Code).To(Equal(http.StatusBadRequest))
+
+		successIRC := func(r *http.Request) (io.ReadCloser, error) {
+			return io.NopCloser(strings.NewReader("data")), nil
+		}
+		retryHandler := server.uploadHandlerAsync(successIRC)
+
+		retryReq, err := http.NewRequest(http.MethodPost, common.UploadPathAsync, strings.NewReader("data"))
+		Expect(err).ToNot(HaveOccurred())
+		retryRR := httptest.NewRecorder()
+		retryHandler(retryRR, retryReq)
+		Expect(retryRR.Code).To(Equal(http.StatusOK))
+	})
+
 	It("should handle deadline", func() {
 		server, _, _, cleanup := newTLSServer("client", "client")
 		defer cleanup()
